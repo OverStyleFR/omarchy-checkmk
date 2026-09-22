@@ -3,7 +3,7 @@
   "id": "tomv.checkmk",
   "name": "CheckMK",
   "description": "Supervise a remote CheckMK instance from the Omarchy bar: active alerts count, detailed problem panel, acknowledge and refresh actions.",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "author": "OverStyleFR",
   "license": "MIT",
   "kinds": [
