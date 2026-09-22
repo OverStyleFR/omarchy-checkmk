@@ -165,10 +165,10 @@ cmd_problems() {
     while IFS= read -r item; do
       [[ -z "$item" || "$item" == "null" ]] && continue
       local name state last_change output sname
-      name="$(echo "$item" | jq -r '.name // .title // empty')"
-      state="$(echo "$item" | jq -r '.state // empty')"
-      last_change="$(echo "$item" | jq -r '.last_state_change // empty')"
-      output="$(echo "$item" | jq -r '.plugin_output // empty')"
+      name="$(echo "$item" | jq -r '(.extensions // .).name // (.extensions // .).title // empty')"
+      state="$(echo "$item" | jq -r '(.extensions // .).state // empty')"
+      last_change="$(echo "$item" | jq -r '(.extensions // .).last_state_change // empty')"
+      output="$(echo "$item" | jq -r '(.extensions // .).plugin_output // empty')"
       sname="$(host_state_name "$state")"
       [[ "$sname" == "up" ]] && continue
 
@@ -203,11 +203,11 @@ cmd_problems() {
     while IFS= read -r item; do
       [[ -z "$item" || "$item" == "null" ]] && continue
       local host desc state last_change output sname
-      host="$(echo "$item" | jq -r '.host_name // empty')"
-      desc="$(echo "$item" | jq -r '.description // empty')"
-      state="$(echo "$item" | jq -r '.state // empty')"
-      last_change="$(echo "$item" | jq -r '.last_state_change // empty')"
-      output="$(echo "$item" | jq -r '.plugin_output // empty')"
+      host="$(echo "$item" | jq -r '(.extensions // .).host_name // empty')"
+      desc="$(echo "$item" | jq -r '(.extensions // .).description // empty')"
+      state="$(echo "$item" | jq -r '(.extensions // .).state // empty')"
+      last_change="$(echo "$item" | jq -r '(.extensions // .).last_state_change // empty')"
+      output="$(echo "$item" | jq -r '(.extensions // .).plugin_output // empty')"
       sname="$(service_state_name "$state")"
       [[ "$sname" == "ok" ]] && continue
 
