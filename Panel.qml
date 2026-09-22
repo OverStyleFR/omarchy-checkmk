@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Layouts
+import QtQuick.Controls 2.15
 import Quickshell
 import Quickshell.Io
 import qs.Ui
