@@ -66,6 +66,11 @@ taken from the `acknowledgeComment` setting.
 The public CheckMK REST API does **not** expose a reschedule/recheck endpoint.
 Use **Open in CheckMK** and click the Reschedule action there.
 
+The Recheck action is already implemented in `scripts/checkmk-status` and in
+the panel code, but the UI button is hidden until CheckMK exposes a recheck
+endpoint. To show it, change `visible: false` to `visible: true` on the
+Recheck `PanelActionButton` in `Panel.qml`.
+
 ## Configure
 
 Move the widget in your bar:

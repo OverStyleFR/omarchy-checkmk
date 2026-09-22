@@ -453,7 +453,11 @@ Panel {
           }
         }
 
+        // Recheck is implemented in scripts/checkmk-status but hidden because
+        // the CheckMK REST API has no reschedule-check endpoint. Set visible
+        // to true once CheckMK exposes one.
         PanelActionButton {
+          visible: false
           iconText: "\uf021"
           foreground: root.bar.foreground
           hoverColor: root.bar.urgent
