@@ -1,0 +1,100 @@
+{
+  "schemaVersion": 1,
+  "id": "tomv.checkmk",
+  "name": "CheckMK",
+  "description": "Supervise a remote CheckMK instance from the Omarchy bar: active alerts count, detailed problem panel, acknowledge and refresh actions.",
+  "version": "1.0.0",
+  "author": "OverStyleFR",
+  "license": "MIT",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "CheckMK",
+    "description": "Remote CheckMK supervision widget with alert counter, grouped problem list and acknowledge action.",
+    "category": "System",
+    "aliases": [
+      "checkmk",
+      "cmk"
+    ],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "baseUrl": "https://checkmk.example.com/monitoring",
+      "apiVersion": "1.0",
+      "refreshIntervalSec": 30,
+      "showAcknowledged": false,
+      "maxItemsInPanel": 50,
+      "useHostAlerts": true,
+      "useServiceAlerts": true,
+      "acknowledgeComment": "Ack from Omarchy bar"
+    },
+    "schema": [
+      {
+        "key": "baseUrl",
+        "type": "string",
+        "label": "CheckMK base URL",
+        "description": "Base URL of the CheckMK site, e.g. https://checkmk.example.com/monitoring. The API path /check_mk/api/<apiVersion> is appended automatically.",
+        "defaultValue": "https://checkmk.example.com/monitoring"
+      },
+      {
+        "key": "apiVersion",
+        "type": "string",
+        "label": "API version",
+        "description": "CheckMK REST API version segment used in the URL.",
+        "defaultValue": "1.0"
+      },
+      {
+        "key": "refreshIntervalSec",
+        "type": "integer",
+        "label": "Refresh interval (seconds)",
+        "description": "How often the CheckMK problems are polled.",
+        "min": 5,
+        "max": 600,
+        "step": 1,
+        "defaultValue": 30
+      },
+      {
+        "key": "showAcknowledged",
+        "type": "boolean",
+        "label": "Show acknowledged problems",
+        "description": "Include host/service problems that have already been acknowledged.",
+        "defaultValue": false
+      },
+      {
+        "key": "maxItemsInPanel",
+        "type": "integer",
+        "label": "Max items in panel",
+        "description": "Maximum number of problems to display in the popup panel.",
+        "min": 1,
+        "max": 200,
+        "step": 1,
+        "defaultValue": 50
+      },
+      {
+        "key": "useHostAlerts",
+        "type": "boolean",
+        "label": "Use host alerts",
+        "description": "Include host DOWN / UNREACHABLE states in the counter and panel.",
+        "defaultValue": true
+      },
+      {
+        "key": "useServiceAlerts",
+        "type": "boolean",
+        "label": "Use service alerts",
+        "description": "Include service CRITICAL / WARNING / UNKNOWN states in the counter and panel.",
+        "defaultValue": true
+      },
+      {
+        "key": "acknowledgeComment",
+        "type": "string",
+        "label": "Acknowledge comment",
+        "description": "Default comment used when acknowledging a problem from the panel.",
+        "defaultValue": "Ack from Omarchy bar"
+      }
+    ]
+  }
+}

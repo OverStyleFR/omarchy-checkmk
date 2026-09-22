@@ -1,0 +1,374 @@
+#!/usr/bin/env bash
+# checkmk-status — CheckMK remote supervision helper for tomv.checkmk.
+# Self-contained script: reads credentials from ~/.config/tomv.checkmk/.env
+# and talks to the CheckMK REST API (v1 / 1.0).
+#
+# Modes:
+#   --problems
+#   --acknowledge {target} {comment}   target = hostname | hostname|service
+#   --recheck-host {host}
+#   --recheck-service {host|service}
+
+set -uo pipefail
+
+CONFIG_DIR="${HOME}/.config/tomv.checkmk"
+ENV_FILE="${CONFIG_DIR}/.env"
+
+usage() {
+  cat <<EOF
+Usage: checkmk-status --base-url <url> --api-version <ver> [options] <mode>
+
+Modes:
+  --problems                         Output JSON summary of active problems.
+  --acknowledge {target} {comment}   Acknowledge host or service problem.
+                                     target = hostname  or  hostname|service
+  --recheck-host {host}              (Not supported by CheckMK REST API.)
+  --recheck-service {target}         (Not supported by CheckMK REST API.)
+                                     target = hostname|service
+
+Options:
+  --base-url <url>                   CheckMK base URL, e.g.
+                                     https://checkmk.example.com/monitoring
+  --api-version <ver>                API version segment (default: 1.0)
+  --show-acknowledged                Include acknowledged problems.
+  --max-items <n>                    Maximum problems to return (default: 50)
+  --use-host-alerts <true|false>     Include host alerts (default: true)
+  --use-service-alerts <true|false>  Include service alerts (default: true)
+
+Credentials are read from ${ENV_FILE}:
+  CHECKMK_USERNAME=automation
+  CHECKMK_SECRET=xxx
+EOF
+  exit 1
+}
+
+die() {
+  echo "ERROR: $1" >&2
+  exit 1
+}
+
+json_die() {
+  jq -n --arg msg "$1" '{error: $msg}' >&2
+  exit 1
+}
+
+load_credentials() {
+  if [[ ! -f "$ENV_FILE" ]]; then
+    json_die "Credentials file not found: ${ENV_FILE}"
+  fi
+
+  local mode
+  mode="$(stat -c '%a' "$ENV_FILE" 2>/dev/null || stat -f '%Lp' "$ENV_FILE" 2>/dev/null || echo "???")"
+  if [[ "$mode" != "600" && "$mode" != "400" ]]; then
+    json_die "Credentials file ${ENV_FILE} must have mode 600 (found ${mode}). Run: chmod 600 ${ENV_FILE}"
+  fi
+
+  # shellcheck source=/dev/null
+  source "$ENV_FILE"
+
+  if [[ -z "${CHECKMK_USERNAME:-}" || -z "${CHECKMK_SECRET:-}" ]]; then
+    json_die "CHECKMK_USERNAME and CHECKMK_SECRET must be set in ${ENV_FILE}"
+  fi
+}
+
+build_api_url() {
+  local base="$1" version="${2:-1.0}"
+  base="${base%/}"
+  echo "${base}/check_mk/api/${version}"
+}
+
+api_post() {
+  local url="$1" body="$2"
+  curl -s -S -L -f \
+    -H "Authorization: Bearer ${CHECKMK_USERNAME} ${CHECKMK_SECRET}" \
+    -H "Accept: application/json" \
+    -H "Content-Type: application/json" \
+    -d "$body" \
+    "$url"
+}
+
+host_state_name() {
+  case "$1" in
+    0) echo "up" ;;
+    1) echo "down" ;;
+    2) echo "unreachable" ;;
+    *) echo "unknown" ;;
+  esac
+}
+
+service_state_name() {
+  case "$1" in
+    0) echo "ok" ;;
+    1) echo "warning" ;;
+    2) echo "critical" ;;
+    3) echo "unknown" ;;
+    *) echo "unknown" ;;
+  esac
+}
+
+severity_rank() {
+  case "$1" in
+    critical|down) echo 4 ;;
+    unreachable)   echo 3 ;;
+    unknown)       echo 2 ;;
+    warning)       echo 1 ;;
+    *)             echo 0 ;;
+  esac
+}
+
+worst_state_priority() {
+  case "$1" in
+    critical|down) echo 4 ;;
+    unreachable)   echo 3 ;;
+    unknown)       echo 2 ;;
+    warning)       echo 1 ;;
+    ok)            echo 0 ;;
+    *)             echo -1 ;;
+  esac
+}
+
+cmd_problems() {
+  local base_url="$1" api_version="$2" show_ack="$3" max_items="$4"
+  local use_hosts="$5" use_services="$6"
+  local api_url
+  api_url="$(build_api_url "$base_url" "$api_version")"
+
+  local host_filter service_filter
+  host_filter='{"op": "!=", "left": "state", "right": "0"}'
+  service_filter='{"op": "!=", "left": "state", "right": "0"}'
+
+  if [[ "$show_ack" != "true" ]]; then
+    host_filter="$(jq -n \
+      --argjson base "$host_filter" \
+      '{op: "and", expr: [$base, {op: "=", left: "acknowledged", right: "0"}, {op: "=", left: "scheduled_downtime_depth", right: "0"}]}')"
+    service_filter="$(jq -n \
+      --argjson base "$service_filter" \
+      '{op: "and", expr: [$base, {op: "=", left: "acknowledged", right: "0"}, {op: "=", left: "scheduled_downtime_depth", right: "0"}]}')"
+  fi
+
+  local problems_json="[]"
+  local hosts_down=0 services_critical=0 services_warning=0 services_unknown=0
+
+  if [[ "$use_hosts" == "true" ]]; then
+    local host_cols='["name","state","acknowledged","scheduled_downtime_depth","last_state_change","plugin_output"]'
+    local host_resp host_body
+    host_body="$(jq -n \
+      --argjson query "$host_filter" \
+      --argjson columns "$host_cols" \
+      '{query: $query, columns: $columns}')"
+
+    host_resp="$(api_post "${api_url}/domain-types/host/collections/all" "$host_body")" || {
+      json_die "CheckMK host query failed"
+    }
+
+    local item
+    while IFS= read -r item; do
+      [[ -z "$item" || "$item" == "null" ]] && continue
+      local name state last_change output sname
+      name="$(echo "$item" | jq -r '.name // .title // empty')"
+      state="$(echo "$item" | jq -r '.state // empty')"
+      last_change="$(echo "$item" | jq -r '.last_state_change // empty')"
+      output="$(echo "$item" | jq -r '.plugin_output // empty')"
+      sname="$(host_state_name "$state")"
+      [[ "$sname" == "up" ]] && continue
+
+      problems_json="$(echo "$problems_json" | jq --argjson p "$(jq -n \
+        --arg type host \
+        --arg host "$name" \
+        --arg state "$sname" \
+        --arg output "$output" \
+        --arg last_state_change "$last_change" \
+        '{type: $type, host: $host, state: $state, output: $output, last_state_change: $last_state_change}')" '. + [$p]')"
+
+      case "$sname" in
+        down)        ((hosts_down++)) ;;
+        unreachable) ((services_unknown++)) ;;
+      esac
+    done < <(echo "$host_resp" | jq -c '.value[]? // empty')
+  fi
+
+  if [[ "$use_services" == "true" ]]; then
+    local svc_cols='["host_name","description","state","acknowledged","scheduled_downtime_depth","last_state_change","plugin_output"]'
+    local svc_resp svc_body
+    svc_body="$(jq -n \
+      --argjson query "$service_filter" \
+      --argjson columns "$svc_cols" \
+      '{query: $query, columns: $columns}')"
+
+    svc_resp="$(api_post "${api_url}/domain-types/service/collections/all" "$svc_body")" || {
+      json_die "CheckMK service query failed"
+    }
+
+    local item
+    while IFS= read -r item; do
+      [[ -z "$item" || "$item" == "null" ]] && continue
+      local host desc state last_change output sname
+      host="$(echo "$item" | jq -r '.host_name // empty')"
+      desc="$(echo "$item" | jq -r '.description // empty')"
+      state="$(echo "$item" | jq -r '.state // empty')"
+      last_change="$(echo "$item" | jq -r '.last_state_change // empty')"
+      output="$(echo "$item" | jq -r '.plugin_output // empty')"
+      sname="$(service_state_name "$state")"
+      [[ "$sname" == "ok" ]] && continue
+
+      problems_json="$(echo "$problems_json" | jq --argjson p "$(jq -n \
+        --arg type service \
+        --arg host "$host" \
+        --arg service "$desc" \
+        --arg state "$sname" \
+        --arg output "$output" \
+        --arg last_state_change "$last_change" \
+        '{type: $type, host: $host, service: $service, state: $state, output: $output, last_state_change: $last_state_change}')" '. + [$p]')"
+
+      case "$sname" in
+        critical) ((services_critical++)) ;;
+        warning)  ((services_warning++)) ;;
+        unknown)  ((services_unknown++)) ;;
+      esac
+    done < <(echo "$svc_resp" | jq -c '.value[]? // empty')
+  fi
+
+  problems_json="$(echo "$problems_json" | jq -c 'sort_by([
+    -(.state | if . == "critical" or . == "down" then 4
+               elif . == "unreachable" then 3
+               elif . == "unknown" then 2
+               elif . == "warning" then 1
+               else 0 end),
+    .host,
+    .service // ""
+  ])')"
+
+  problems_json="$(echo "$problems_json" | jq -c --argjson max "$max_items" '.[:$max]')"
+
+  local total worst
+  total="$(echo "$problems_json" | jq 'length')"
+  worst="ok"
+  while IFS= read -r p; do
+    [[ -z "$p" || "$p" == "null" ]] && continue
+    local s
+    s="$(echo "$p" | jq -r '.state')"
+    if [[ "$(severity_rank "$s")" -gt "$(worst_state_priority "$worst")" ]]; then
+      worst="$s"
+    fi
+  done < <(echo "$problems_json" | jq -c '.[]')
+
+  [[ "$total" -gt 0 && "$worst" == "ok" ]] && worst="warning"
+
+  jq -n \
+    --argjson hostsDown "$hosts_down" \
+    --argjson servicesCritical "$services_critical" \
+    --argjson servicesWarning "$services_warning" \
+    --argjson servicesUnknown "$services_unknown" \
+    --argjson total "$total" \
+    --arg worstState "$worst" \
+    --argjson problems "$problems_json" \
+    '{
+      summary: {
+        hostsDown: $hostsDown,
+        servicesCritical: $servicesCritical,
+        servicesWarning: $servicesWarning,
+        servicesUnknown: $servicesUnknown,
+        total: $total
+      },
+      worstState: $worstState,
+      problems: $problems
+    }'
+}
+
+cmd_acknowledge() {
+  local base_url="$1" api_version="$2" type="$3" target="$4" comment="$5"
+  local api_url
+  api_url="$(build_api_url "$base_url" "$api_version")"
+
+  local host_name service_description body
+  host_name="${target%%|*}"
+  service_description="${target#*|}"
+  [[ "$host_name" == "$target" ]] && service_description=""
+
+  if [[ "$type" == "host" ]]; then
+    body="$(jq -n \
+      --arg acknowledge_type host \
+      --arg host_name "$host_name" \
+      --arg comment "$comment" \
+      '{acknowledge_type: $acknowledge_type, host_name: $host_name, comment: $comment, sticky: true, notify: true, persistent: false}')"
+    api_post "${api_url}/domain-types/acknowledge/collections/host" "$body" >/dev/null || {
+      json_die "Failed to acknowledge host ${host_name}"
+    }
+  else
+    body="$(jq -n \
+      --arg acknowledge_type service \
+      --arg host_name "$host_name" \
+      --arg service_description "$service_description" \
+      --arg comment "$comment" \
+      '{acknowledge_type: $acknowledge_type, host_name: $host_name, service_description: $service_description, comment: $comment, sticky: true, notify: true, persistent: false}')"
+    api_post "${api_url}/domain-types/acknowledge/collections/service" "$body" >/dev/null || {
+      json_die "Failed to acknowledge service ${service_description} on ${host_name}"
+    }
+  fi
+
+  jq -n '{ok: true, message: "Acknowledged"}'
+}
+
+cmd_recheck_host() {
+  json_die "Recheck host is not supported by the CheckMK REST API. Open the host in CheckMK and use the Reschedule action manually."
+}
+
+cmd_recheck_service() {
+  json_die "Recheck service is not supported by the CheckMK REST API. Open the service in CheckMK and use the Reschedule action manually."
+}
+
+main() {
+  local base_url="" api_version="1.0" mode="" mode_arg=""
+  local show_acknowledged="false" max_items=50
+  local use_host_alerts="true" use_service_alerts="true"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --base-url)          base_url="$2"; shift 2 ;;
+      --api-version)       api_version="$2"; shift 2 ;;
+      --show-acknowledged) show_acknowledged="true"; shift ;;
+      --max-items)         max_items="$2"; shift 2 ;;
+      --use-host-alerts)   use_host_alerts="$2"; shift 2 ;;
+      --use-service-alerts) use_service_alerts="$2"; shift 2 ;;
+      --problems)
+        mode="problems"; shift ;;
+      --acknowledge|--recheck-host|--recheck-service)
+        mode="${1#--}"; mode_arg="${2:-}"; shift 2; break ;;
+      -h|--help) usage ;;
+      *) die "Unknown argument: $1" ;;
+    esac
+  done
+
+  if [[ -z "$base_url" ]]; then
+    json_die "Missing required --base-url"
+  fi
+
+  load_credentials
+
+  case "$mode" in
+    problems)
+      cmd_problems "$base_url" "$api_version" "$show_acknowledged" "$max_items" "$use_host_alerts" "$use_service_alerts"
+      ;;
+    acknowledge)
+      if [[ -z "$mode_arg" || $# -lt 1 ]]; then
+        json_die "Usage: --acknowledge {target} {comment}   target = hostname or hostname|service"
+      fi
+      local ack_target="$mode_arg" ack_comment="$1"
+      shift
+      local ack_type="host"
+      [[ "$ack_target" == *"|"* ]] && ack_type="service"
+      cmd_acknowledge "$base_url" "$api_version" "$ack_type" "$ack_target" "$ack_comment"
+      ;;
+    recheck-host)
+      cmd_recheck_host "$base_url" "$api_version" "$mode_arg"
+      ;;
+    recheck-service)
+      cmd_recheck_service "$base_url" "$api_version" "$mode_arg"
+      ;;
+    *)
+      json_die "No mode specified. Use --problems, --acknowledge, --recheck-host or --recheck-service."
+      ;;
+  esac
+}
+
+main "$@"
